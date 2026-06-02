@@ -10,9 +10,6 @@ from xgboost import XGBClassifier
 MODEL_JSON = "health_nutrition_model.json"
 MODEL_PKL = "health_nutrition_model.pkl"
 
-# ✅ Load the trained model.
-# Prefer XGBoost native format (.json) -- version-portable, no load warning.
-# Fallback: legacy pickle (run convert_model.py once to migrate).
 xgb_model = None
 try:
     if os.path.exists(MODEL_JSON):

@@ -1,0 +1,73 @@
+{
+  "info": {
+    "name": "NutriScan API",
+    "description": "NutriScan model API — health/nutrition prediction. Set the {{base_url}} variable to switch between production and local.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://nutriscan-model-production.up.railway.app",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check (GET /)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/",
+          "host": ["{{base_url}}"],
+          "path": [""]
+        },
+        "description": "Checks if the API is running. Expected: {\"message\": \"NutriScan API is running!\"}"
+      }
+    },
+    {
+      "name": "Predict — Unhealthy example (POST /predict)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"Calories\": 200,\n  \"Protein\": 10.0,\n  \"Carbohydrates\": 30.0,\n  \"Fat\": 25.0,\n  \"Fiber\": 1.0,\n  \"Sugars\": 30.0,\n  \"Sodium\": 600,\n  \"Cholesterol\": 50,\n  \"Water_Intake\": 200,\n  \"Meal_Type_Dinner\": true,\n  \"Meal_Type_Lunch\": false,\n  \"Meal_Type_Snack\": false,\n  \"Category_Dairy\": false,\n  \"Category_Fruits\": false,\n  \"Category_Grains\": false,\n  \"Category_Meat\": true,\n  \"Category_Snacks\": false,\n  \"Category_Vegetables\": false\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/predict",
+          "host": ["{{base_url}}"],
+          "path": ["predict"]
+        },
+        "description": "Sends nutrition data and returns Prediction + Health Risks."
+      }
+    },
+    {
+      "name": "Predict — Healthy example (POST /predict)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"Calories\": 120,\n  \"Protein\": 8.0,\n  \"Carbohydrates\": 20.0,\n  \"Fat\": 5.0,\n  \"Fiber\": 6.0,\n  \"Sugars\": 8.0,\n  \"Sodium\": 100,\n  \"Cholesterol\": 10,\n  \"Water_Intake\": 500,\n  \"Meal_Type_Dinner\": false,\n  \"Meal_Type_Lunch\": true,\n  \"Meal_Type_Snack\": false,\n  \"Category_Dairy\": false,\n  \"Category_Fruits\": false,\n  \"Category_Grains\": false,\n  \"Category_Meat\": false,\n  \"Category_Snacks\": false,\n  \"Category_Vegetables\": true\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/predict",
+          "host": ["{{base_url}}"],
+          "path": ["predict"]
+        },
+        "description": "A lighter meal example."
+      }
+    }
+  ]
+}
