@@ -1,13 +1,31 @@
+import os
+import warnings
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
-import joblib
 from fastapi.responses import JSONResponse
+from xgboost import XGBClassifier
 
-# ✅ Load the trained model
+MODEL_JSON = "health_nutrition_model.json"
+MODEL_PKL = "health_nutrition_model.pkl"
+
+# ✅ Load the trained model.
+# Prefer XGBoost native format (.json) -- version-portable, no load warning.
+# Fallback: legacy pickle (run convert_model.py once to migrate).
+xgb_model = None
 try:
-    xgb_model = joblib.load("health_nutrition_model.pkl")  # Adjust filename if needed
-    print("✅ Model loaded successfully.")
+    if os.path.exists(MODEL_JSON):
+        xgb_model = XGBClassifier()
+        xgb_model.load_model(MODEL_JSON)
+        print("✅ Model loaded from native JSON.")
+    else:
+        import joblib
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            xgb_model = joblib.load(MODEL_PKL)
+        print("⚠️ Loaded legacy pickle. Run convert_model.py to remove the "
+              "XGBoost version warning.")
 except Exception as e:
     print(f"❌ Failed to load model: {e}")
 
