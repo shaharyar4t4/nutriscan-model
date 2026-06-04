@@ -47,17 +47,10 @@ class NutritionData(BaseModel):
     Category_Snacks: bool
     Category_Vegetables: bool
 
-# ✅ Create FastAPI app
 app = FastAPI()
 
-# ✅ Health risk analysis (deep, multi-factor evaluation)
 def health_risks(nutrition):
-    """
-    Analyze nutrition values and return a list of potential health risks.
-    Each risk includes the affected condition and a severity level
-    (Moderate / High / Very High) based on how far the value crosses
-    medically-informed thresholds.
-    """
+
     risks = []
 
     # --- Fat: cardiovascular load ---
@@ -127,14 +120,7 @@ def health_risks(nutrition):
 
 
 def _should_force_unhealthy(n):
-    """
-    Deterministic guardrail. Model kabhi-kabhi low-fat/low-calorie items
-    (jaise cola) ko 'Healthy' bol deta hai kyunki sirf sugar high hota hai.
-    Yeh function clearly unhealthy nutrient levels par model ko override karta hai.
 
-    Fiber se 'whole fruit' (high sugar + fiber, e.g. banana) aur 'processed sugar'
-    (high sugar + no fiber, e.g. cola/candy) ko distinguish karte hain.
-    """
     sugars = n['Sugars']
     fat = n['Fat']
     sodium = n['Sodium']
