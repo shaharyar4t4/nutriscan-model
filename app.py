@@ -125,6 +125,39 @@ def health_risks(nutrition):
 
     return risks
 
+
+def _should_force_unhealthy(n):
+    """
+    Deterministic guardrail. Model kabhi-kabhi low-fat/low-calorie items
+    (jaise cola) ko 'Healthy' bol deta hai kyunki sirf sugar high hota hai.
+    Yeh function clearly unhealthy nutrient levels par model ko override karta hai.
+
+    Fiber se 'whole fruit' (high sugar + fiber, e.g. banana) aur 'processed sugar'
+    (high sugar + no fiber, e.g. cola/candy) ko distinguish karte hain.
+    """
+    sugars = n['Sugars']
+    fat = n['Fat']
+    sodium = n['Sodium']
+    calories = n['Calories']
+    cholesterol = n['Cholesterol']
+    fiber = n['Fiber']
+    is_snack = n.get('Category_Snacks', False)
+
+    # Very high absolute levels — kisi bhi item ke liye
+    if fat > 20 or sodium > 600 or cholesterol > 250 or calories > 600:
+        return True
+    # Bahut zyada sugar — kuch bhi ho
+    if sugars >= 18:
+        return True
+    # High sugar + (almost) no fiber => processed sugary (cola, candy, juice)
+    if sugars >= 10 and fiber < 1.5:
+        return True
+    # Snack/beverage bucket ke liye sugar threshold strict
+    if is_snack and sugars >= 8:
+        return True
+    return False
+
+
 @app.post("/predict")
 def predict(data: NutritionData):
     try:
@@ -159,6 +192,11 @@ def predict(data: NutritionData):
 
         # ✅ Correct Mapping: 0 → Healthy, 1 → Unhealthy
         prediction_label = "Healthy" if prediction == 0 else "Unhealthy"
+
+        # ✅ Deterministic guardrail: clearly unhealthy nutrients -> Unhealthy
+        if prediction_label == "Healthy" and _should_force_unhealthy(data.dict()):
+            prediction_label = "Unhealthy"
+            print("Overridden to Unhealthy by nutrient rules.")
 
         # ✅ Health risks
         risks = health_risks(data.dict())
