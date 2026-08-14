@@ -5,7 +5,7 @@ nutrition values, and returns a list of specific health risks alongside the
 prediction.
 
 Prediction comes from two layers stacked on top of each other: a trained XGBoost
-classifier, and a hand-written rule guardrail that can override it. Understanding
+classifier, and a deterministic rule guardrail that can override it. Understanding
 that both layers exist is the key to understanding this project — see
 [Step 5](#step-5-the-rule-guardrail-can-override-the-model).
 
@@ -19,7 +19,7 @@ that both layers exist is the key to understanding this project — see
 4. [How a prediction works, step by step](#how-a-prediction-works-step-by-step)
 5. [API reference](#api-reference)
 6. [The rule thresholds](#the-rule-thresholds)
-7. [Known issues](#known-issues)
+7. [Known limitations](#known-limitations)
 
 ---
 
@@ -27,7 +27,7 @@ that both layers exist is the key to understanding this project — see
 
 | File | What it does |
 |---|---|
-| `app.py` | The whole service: model loading, the two rule functions, and both endpoints. |
+| `app.py` | The whole service: model loading, the rule engine, and both endpoints. |
 | `health_nutrition_model.pkl` | The trained XGBoost classifier, saved with joblib. 18 features. |
 | `convert_model.py` | One-off script that re-saves the `.pkl` as XGBoost's native `.json` format. |
 | `Procfile` | Railway/Heroku start command: `uvicorn app:app --host 0.0.0.0 --port $PORT` |
@@ -91,13 +91,14 @@ than load-bearing.
 
 `app.py` prefers `health_nutrition_model.json` if it exists, and falls back to
 the `.pkl` otherwise. The `.json` is **not committed**, so out of the box the
-service always loads the pickle and prints a warning. To silence it:
+service always loads the pickle and logs a warning. To silence it:
 
 ```bash
 ./myenv/Scripts/python.exe convert_model.py
 ```
 
-This writes `health_nutrition_model.json` next to the pickle.
+This writes `health_nutrition_model.json` next to the pickle. `GET /` reports
+which one is in use via its `model_source` field.
 
 ---
 
@@ -107,19 +108,18 @@ This writes `health_nutrition_model.json` next to the pickle.
 PYTHONIOENCODING=utf-8 ./myenv/Scripts/python.exe -m uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
-> **`PYTHONIOENCODING=utf-8` is required on Windows.** `app.py` prints emoji
-> (`✅`, `⚠️`, `❌`) at import time. On a default `cp1252` Windows console this
-> raises `UnicodeEncodeError` at `app.py:27` and the app never starts. Linux and
-> Railway default to UTF-8, so this only bites local Windows development.
-
 Once it is up:
 
 | URL | What you get |
 |---|---|
-| <http://127.0.0.1:8000/> | `{"message":"NutriScan API is running!"}` |
+| <http://127.0.0.1:8000/> | `{"message":"NutriScan API is running!","model_source":"legacy-pickle"}` |
 | <http://127.0.0.1:8000/docs> | Interactive Swagger UI — easiest way to try `/predict` |
 
 Add `--reload` during development to restart on file changes.
+
+If the model file cannot be loaded, **the app refuses to start** and the
+traceback names the missing file. It does not boot into a state where `/`
+reports healthy while `/predict` returns 500s.
 
 ---
 
@@ -127,22 +127,26 @@ Add `--reload` during development to restart on file changes.
 
 ### Step 0 — The model loads once, at import
 
-`app.py:14-27` runs when the module is imported, before any request is served.
-It tries the native JSON first, then the pickle. If **both** fail, the exception
-is caught, `xgb_model` stays `None`, and the app still starts — see
-[Known issues](#known-issues).
+`_load_model()` runs when the module is imported, before any request is served.
+It tries the native JSON first, then the pickle, and records which one it used in
+`MODEL_SOURCE`. Exceptions are deliberately **not** caught — see the note above.
 
 ### Step 1 — The request is validated
 
-A `POST /predict` body is parsed into the `NutritionData` Pydantic model
-(`app.py:30-48`). It has exactly **18 fields**: 9 numeric nutrition values, 3
-`Meal_Type_*` booleans, and 6 `Category_*` booleans. Anything missing or of the
-wrong type is rejected with a `422` before your code runs.
+A `POST /predict` body is parsed into the `NutritionData` Pydantic model. It has
+exactly **18 fields**: 9 numeric nutrition values, 3 `Meal_Type_*` booleans, and
+6 `Category_*` booleans.
+
+Validation rejects, with a `422`, any request that:
+
+- omits a field or sends the wrong type,
+- sends a **negative** number (every numeric field is `Field(ge=0)`), or
+- sets **more than one flag** within either the `Meal_Type_*` or the
+  `Category_*` group — they are one-hot encoded, so at most one may be true.
 
 ### Step 2 — Field names are mapped to the training column names
 
-The API field names and the model's feature names are not the same. `app.py:151-170`
-translates between them:
+The API field names and the model's feature names are not the same:
 
 | API field | Model feature name |
 |---|---|
@@ -152,17 +156,14 @@ translates between them:
 | `Water_Intake` | `Water_Intake (ml)` |
 | `Meal_Type_*`, `Category_*` | unchanged |
 
-This mapping must match the model's feature names exactly, or XGBoost raises a
-feature-mismatch error. The names in the shipped `.pkl` do line up with this
-mapping.
-
 ### Step 3 — A one-row DataFrame is built
 
 ```python
-input_data = pd.DataFrame([mapped_data])
+input_data = pd.DataFrame([mapped_data], columns=FEATURE_COLUMNS)
 ```
 
-XGBoost is given a single-row table because that is the shape it was trained on.
+`FEATURE_COLUMNS` pins the column order the model was trained on, so a
+reordered payload cannot silently shift features.
 
 ### Step 4 — The model predicts
 
@@ -171,38 +172,32 @@ prediction = xgb_model.predict(input_data)[0]   # 0 or 1
 prediction_label = "Healthy" if prediction == 0 else "Unhealthy"
 ```
 
-`0` means Healthy, `1` means Unhealthy.
-
 ### Step 5 — The rule guardrail can override the model
 
-This is the part that surprises people. `_should_force_unhealthy` (`app.py:122-144`)
-is a set of hardcoded nutrient thresholds. If the model said **Healthy** but the
-rules disagree, the answer is flipped to **Unhealthy**:
+`_assess()` walks the nutrition values through the thresholds in
+[The rule thresholds](#the-rule-thresholds) and returns
+`(severity, message)` pairs. Severity is one of `moderate`, `high` or
+`very_high`.
 
-```python
-if prediction_label == "Healthy" and _should_force_unhealthy(data.dict()):
-    prediction_label = "Unhealthy"
-```
+If the model said **Healthy** but any finding is `high` or worse, the verdict is
+flipped to **Unhealthy**. `moderate` findings are advisory and never change the
+verdict.
 
-Two consequences worth internalising:
+The override is **one-directional**: a model prediction of `Unhealthy` is never
+re-examined, only `Healthy` can be flipped.
 
-- The override is **one-directional**. A model prediction of `Unhealthy` is never
-  re-examined; only `Healthy` can be flipped.
-- The thresholds are broad, so in practice **the rules decide most `Unhealthy`
-  answers**, not the model. See [The rule thresholds](#the-rule-thresholds).
+### Step 6 — The risk messages come from the same pass
 
-### Step 6 — The risk list is built independently
+The messages in the response are the message halves of the very same
+`_assess()` result that decided Step 5. This is what keeps the two halves of a
+response consistent:
 
-`health_risks` (`app.py:52-119`) walks the same nutrition values through its own
-separate set of thresholds and appends a human-readable sentence for each one it
-trips. It also checks four combination patterns (low fiber + high fat, high sugar
-+ high fat, high sodium + high cholesterol, low water + high sodium). If nothing
-trips, it returns a single "no major risks" message.
+- anything that forces `Unhealthy` always ships the `high` message explaining why, and
+- a response whose worst finding is `moderate` is always `Healthy`.
 
-**This function does not look at the prediction, and the prediction does not look
-at this function.** They are two independent passes over the same input, using
-*different* threshold values — which is why the two halves of a response can
-contradict each other.
+If `_assess()` finds nothing at all, the response carries one of two messages
+depending on what the model said — see the grapes case in
+[Known limitations](#known-limitations).
 
 ### Step 7 — The response is assembled
 
@@ -217,15 +212,15 @@ contradict each other.
 
 ### `GET /`
 
-Liveness check.
+Liveness check. `model_source` is `native-json` or `legacy-pickle`.
 
 ```json
-{"message": "NutriScan API is running!"}
+{"message": "NutriScan API is running!", "model_source": "legacy-pickle"}
 ```
 
 ### `POST /predict`
 
-All 18 fields are required.
+All 18 fields are required. Every numeric field is a `float >= 0`.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/predict \
@@ -247,102 +242,98 @@ curl -X POST http://127.0.0.1:8000/predict \
 }
 ```
 
-**Field types.** `Calories`, `Sodium`, `Cholesterol` and `Water_Intake` are typed
-as `int`; the rest are `float`. Sending `"Calories": 105.5` returns a `422`, not a
-rounded value.
-
-**Boolean fields.** `Meal_Type_*` and `Category_*` are one-hot flags from training.
-There is no `Meal_Type_Breakfast` field — all three `Meal_Type_*` set to `false`
-is the implied baseline. Nothing enforces that at most one flag per group is
-`true`.
+**Boolean fields.** `Meal_Type_*` and `Category_*` are one-hot flags from training
+with the first level dropped. There is no `Meal_Type_Breakfast` field — all three
+`Meal_Type_*` set to `false` is the implied baseline. At most one flag per group
+may be `true`.
 
 | Status | Meaning |
 |---|---|
 | `200` | Prediction returned. |
-| `422` | Pydantic validation failed — a field is missing or the wrong type. |
-| `500` | Prediction raised. Body is `{"error": "Internal Server Error: ..."}`. |
+| `422` | Validation failed — missing field, wrong type, negative value, or conflicting one-hot flags. |
+| `500` | Prediction raised. Body is `{"detail": "Internal server error"}`; the real cause is in the server log. |
 
 ---
 
 ## The rule thresholds
 
-Both rule functions hardcode their own numbers, and **the numbers do not agree**.
-This table is the single most useful thing to know when a prediction looks wrong.
+All thresholds live in one constants block at the top of `app.py` and are used by
+both the verdict and the risk text, so the two cannot drift apart.
 
-| Nutrient | `health_risks` — adds a risk message at | `_should_force_unhealthy` — forces Unhealthy at |
+### Base thresholds
+
+| Nutrient | `moderate` | `high` | `very_high` |
+|---|---|---|---|
+| Fat (g) | `>15` | `>20` | `>35` |
+| Sugars (g) | `>15` | `>25` | `>40` |
+| Sodium (mg) | — | `>500` | `>1000` |
+| Cholesterol (mg) | `>200` | `>300` | — |
+| Calories (kcal) | `>500`, `>700` | — | — |
+| Fiber (g) | `<2` (only when calories `>=200`) | — | — |
+| Protein (g) | `>50` | — | — |
+
+Only `high` and `very_high` force an `Unhealthy` verdict.
+
+### Context rules
+
+Total fat and total sugar alone misclassify whole foods, so four context rules
+adjust them. The payload has no saturated-fat or added-sugar field, so fiber and
+the category flags act as proxies.
+
+| Rule | Condition | Effect |
 |---|---|---|
-| Fat (g) | `>15` moderate, `>20` high, `>35` very high | `>20` |
-| Sodium (mg) | `>500` high, `>1000` very high | `>600` |
-| Cholesterol (mg) | `>200` elevated, `>300` high | `>250` |
-| Calories (kcal) | `>500` high, `>700` very high | `>600` |
-| Sugars (g) | `>15` moderate, `>25` high, `>40` very high | `>=18`, **or** `>=10` when fiber `<1.5`, **or** `>=8` when `Category_Snacks` |
-| Fiber (g) | `<2` low | only in combination with fat |
-| Protein (g) | `>50` very high | no rule |
+| **Intrinsic sugar** | `Category_Fruits` or `Category_Dairy` | Sugar is only flagged above `40g`. Whole fruit and plain dairy carry sugar packaged with fiber, water and protein. |
+| **Whole plant fat** | (`Category_Fruits` or `Category_Vegetables`) and fiber `>=5g` | Fat is downgraded to `moderate`. This fat is unsaturated — avocado, nuts, seeds. |
+| **Added sugar** | sugar `>=10g` and fiber `<1.5g` and not intrinsic | `high`. Catches soft drinks, candy and juice. |
+| **Snack bucket** | `Category_Snacks` and (sodium `>200mg`, or fat `>10g` with fiber `<3g`) | `high`. Packaged snacks concentrate salt and fat well below the general bars; the fiber test separates chips from nuts. |
 
-Note also that the comparison operators are inconsistent: sugar uses `>=` while
-every other force rule uses `>`.
+### Worked examples
+
+| Input | Verdict | Which rule decided |
+|---|---|---|
+| Avocado (Fat 29.5, Fiber 13.5, Vegetables) | Healthy | Whole plant fat → downgraded to `moderate` |
+| Almonds 1oz unsalted (Fat 14.2, Fiber 3.5, Snacks) | Healthy | Under every bar; fiber `>=3` clears the snack fat rule |
+| Plain milk (Sugars 12, Fiber 0, Dairy) | Healthy | Intrinsic sugar |
+| Large apple (Sugars 23.2, Fruits) | Healthy | Intrinsic sugar |
+| Coca-Cola (Sugars 35, Fiber 0, Snacks) | Unhealthy | Sugar `>25` |
+| Sweetened iced tea (Sugars 22, Fiber 0, Snacks) | Unhealthy | Added sugar |
+| Potato chips 50g (Fat 18, Sodium 290, Snacks) | Unhealthy | Snack bucket, both halves |
+| Diet cola (Sugars 0, Snacks) | Healthy | Nothing trips |
 
 ---
 
-## Known issues
+## Known limitations
 
-These are real, reproduced behaviours — not hypotheticals.
+### The model misclassifies some whole foods on its own
 
-### Whole foods get forced to Unhealthy
+The guardrail can only add `Unhealthy` verdicts, never remove them, so a wrong
+`Unhealthy` from the model passes straight through. One reproducible case:
 
-The guardrail has no notion of intrinsic sugar (fruit, dairy) versus added sugar,
-and treats unsaturated fat like saturated fat. It also never consults
-`Category_Fruits` or `Category_Dairy` — only `Category_Snacks`.
+| Input | Model raw | Confidence | Rules found | API returns |
+|---|---|---|---|---|
+| Grapes, 1 cup (Sugars 23.4, Fiber 1.4, Fruits) | `1` Unhealthy | 99.77% | nothing | **Unhealthy** |
 
-| Input | Model said | API returns | Why |
-|---|---|---|---|
-| Avocado (Fat 29.5, Fiber 13.5) | Healthy | **Unhealthy** | `fat > 20` |
-| Plain milk, 1 cup (Sugars 12, Fiber 0) | Healthy | **Unhealthy** | `sugars >= 10 and fiber < 1.5` |
-| Large apple (Sugars 23.2) | Healthy | **Unhealthy** | `sugars >= 18` |
-
-### Salty junk food slips through
-
-| Input | Model said | API returns |
-|---|---|---|
-| Potato chips 50g (Fat 18, Sodium 290, Cal 274) | Healthy | **Healthy** |
-
-Every threshold sits just under its limit. Note the model *itself* also predicted
-Healthy here, so tightening the guardrail alone will not fix salty-snack
-classification — there is no effective sodium rule below 600 mg.
-
-### A response can contradict itself
-
-Because Step 5 and Step 6 use different thresholds, `Sugars: 18` returns:
+Because the rules find nothing to report here, the response is explicit about
+where the verdict came from rather than claiming a nutrient problem that does not
+exist:
 
 ```json
 { "Prediction": "Unhealthy",
-  "Health Risks": ["Moderate Sugar (>15g): Fine in moderation; avoid if pre-diabetic."] }
+  "Health Risks": ["Flagged as Unhealthy by the model, but no individual nutrient crossed a risk threshold. Treat this as a weak signal."] }
 ```
 
-### No input range validation
+**This is not fixable without retraining**, and the training dataset is not in
+this repo — it has never been committed, so there is nothing to retrain from.
+Options are to obtain the original dataset, or to retire the model and run the
+rule engine alone.
 
-Every numeric field accepts negative numbers. A body with `Calories: -500`,
-`Fat: -50`, `Sugars: -30` returns `200` with `"Prediction": "Healthy"`. There are
-no `Field(ge=0)` constraints.
+### Not yet addressed
 
-### A failed model load is invisible
-
-If loading raises, `app.py:26-27` catches it and leaves `xgb_model = None`. The
-app still starts, `GET /` still reports `"NutriScan API is running!"`, and every
-`/predict` call returns `500`. Health checks stay green while the API is dead.
-
-### Other items
-
-- **`data.dict()` is deprecated** (`app.py:183`, `app.py:188`). Pydantic v2 warns:
-  *"The `dict` method is deprecated; use `model_dump` instead… to be removed in
-  V3.0."*
-- **Exception detail is leaked to clients** (`app.py:199-202`) — the raw exception
-  string is returned in the response body.
 - **No CORS middleware**, so browser-based frontends cannot call this directly.
 - **No `runtime.txt` / `.python-version`**, so the deploy platform picks a Python
   version that the pins may not have wheels for.
+- **Two requirements files**, one stale, and both encoded UTF-16.
+  `scikit-learn` is missing from each.
 - **`__pycache__/app.cpython-313.pyc` is committed.** `.gitignore` contains only
   `myenv`.
-- **Per-request logging is noisy** — `app.py:173` prints the full column list on
-  every call, and user nutrition values reach the logs.
-- **No tests.** The threshold table above is a ready-made test matrix.
+- **No automated tests.** The tables above are a ready-made test matrix.
