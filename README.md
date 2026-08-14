@@ -195,6 +195,19 @@ response consistent:
 - anything that forces `Unhealthy` always ships the `high` message explaining why, and
 - a response whose worst finding is `moderate` is always `Healthy`.
 
+Messages are **sorted worst-first**, so the reason behind an `Unhealthy` verdict
+is the first line a user reads — advisory text like "fine once in a while" never
+lands above the warning that actually decided the verdict.
+
+They are also written for a reader with no nutrition background: plain words, no
+clinical terms, and the user's **own number** rather than the threshold that was
+crossed. Compare:
+
+| | |
+|---|---|
+| Not this | `High Fat (>20g): Not suitable for heart patients; may raise LDL cholesterol.` |
+| This | `High in fat — 25g. It can push up your bad cholesterol, so it is not a good choice for heart patients.` |
+
 If `_assess()` finds nothing at all, the response carries one of two messages
 depending on what the model said — see the grapes case in
 [Known limitations](#known-limitations).
@@ -238,7 +251,20 @@ curl -X POST http://127.0.0.1:8000/predict \
 ```json
 {
   "Prediction": "Healthy",
-  "Health Risks": ["No major nutritional risks detected. Balanced within healthy limits."]
+  "Health Risks": ["This looks fine. Nothing here is at a level to worry about."]
+}
+```
+
+A response with findings lists them worst-first:
+
+```json
+{
+  "Prediction": "Unhealthy",
+  "Health Risks": [
+    "Salty snack — 290mg of sodium. Packet snacks hide a lot of salt, which slowly raises your blood pressure.",
+    "Looks like a fried or packet snack — 18g of fat and only 2.2g of fiber. Filling, but it gives your body very little of what it needs.",
+    "A bit high in fat — 18g. Fine once in a while, just don't make it an everyday food."
+  ]
 }
 ```
 
@@ -319,7 +345,7 @@ exist:
 
 ```json
 { "Prediction": "Unhealthy",
-  "Health Risks": ["Flagged as Unhealthy by the model, but no individual nutrient crossed a risk threshold. Treat this as a weak signal."] }
+  "Health Risks": ["Nothing in this food is at a worrying level on its own, but the overall pattern still looks unhealthy. Treat this as a mild warning."] }
 ```
 
 **This is not fixable without retraining**, and the training dataset is not in

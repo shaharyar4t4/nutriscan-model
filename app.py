@@ -59,15 +59,25 @@ xgb_model, MODEL_SOURCE = _load_model()
 MODERATE, HIGH, VERY_HIGH = "moderate", "high", "very_high"
 FORCES_UNHEALTHY = frozenset({HIGH, VERY_HIGH})
 
-NO_RISK_MESSAGE = "No major nutritional risks detected. Balanced within healthy limits."
+# Messages are returned worst-first, so the reason behind an "Unhealthy" verdict
+# is the first thing a user reads. Otherwise advisory text such as "fine once in
+# a while" can land above the serious warning that actually decided the verdict.
+SEVERITY_ORDER = {VERY_HIGH: 0, HIGH: 1, MODERATE: 2}
+
+NO_RISK_MESSAGE = "This looks fine. Nothing here is at a level to worry about."
 
 # The model can flag a meal that trips no individual threshold (it does this to
-# whole grapes, for one). Returning "no risks detected" beside an "Unhealthy"
-# verdict reads as a bug, so say where the verdict actually came from.
+# whole grapes, for one). Returning "nothing to worry about" beside an
+# "Unhealthy" verdict reads as a bug, so be honest that the warning is weak.
 MODEL_ONLY_MESSAGE = (
-    "Flagged as Unhealthy by the model, but no individual nutrient crossed a "
-    "risk threshold. Treat this as a weak signal."
+    "Nothing in this food is at a worrying level on its own, but the overall "
+    "pattern still looks unhealthy. Treat this as a mild warning."
 )
+
+
+def _amount(value):
+    """Format a nutrient amount for a message: 18.0 -> '18', 29.5 -> '29.5'."""
+    return f"{value:g}"
 
 # --- Thresholds -----------------------------------------------------------
 # Single source of truth. Previously these numbers were duplicated, with
@@ -170,101 +180,120 @@ def _assess(n):
         and fiber >= WHOLE_PLANT_MIN_FIBER
     )
 
+    # Messages are written for someone with no nutrition background: plain
+    # words, the user's own numbers rather than the threshold, and what it
+    # means for them rather than the mechanism.
+
     # --- Fat: cardiovascular load ---
     if fat > FAT_VERY_HIGH and not whole_plant:
-        risks.append((VERY_HIGH, f"Very High Fat (>{FAT_VERY_HIGH:.0f}g): Serious risk "
-                                 "for heart disease and obesity. Avoid if you have a "
-                                 "cardiac condition."))
+        risks.append((VERY_HIGH, f"Very high in fat — {_amount(fat)}g. This is hard on "
+                                 "your heart and can lead to weight gain. Avoid it if "
+                                 "you have any heart problem."))
     elif fat > FAT_HIGH and not whole_plant:
-        risks.append((HIGH, f"High Fat (>{FAT_HIGH:.0f}g): Not suitable for heart "
-                            "patients; may raise LDL cholesterol."))
+        risks.append((HIGH, f"High in fat — {_amount(fat)}g. It can push up your bad "
+                            "cholesterol, so it is not a good choice for heart "
+                            "patients."))
     elif fat > FAT_MODERATE:
         if whole_plant:
-            risks.append((MODERATE, f"High Fat (>{FAT_MODERATE:.0f}g) from a "
-                                    "high-fiber plant food: unsaturated fat, so "
-                                    "calorie-dense rather than a cardiac risk."))
+            risks.append((MODERATE, f"Quite a lot of fat — {_amount(fat)}g — but it is "
+                                    "the good kind that comes from plants. It is "
+                                    "filling and heavy in calories, not bad for your "
+                                    "heart."))
         else:
-            risks.append((MODERATE, f"Moderate Fat (>{FAT_MODERATE:.0f}g): Acceptable "
-                                    "occasionally, but watch overall daily intake."))
+            risks.append((MODERATE, f"A bit high in fat — {_amount(fat)}g. Fine once in "
+                                    "a while, just don't make it an everyday food."))
 
     # --- Sugars: diabetes / metabolic ---
     if intrinsic_sugar:
         if sugars > SUGAR_INTRINSIC_HIGH:
-            risks.append((HIGH, f"Very High Sugar (>{SUGAR_INTRINSIC_HIGH:.0f}g): "
-                                "intrinsic to fruit or dairy, but this portion is "
-                                "large enough to spike blood sugar."))
+            risks.append((HIGH, f"Very high in sugar — {_amount(sugars)}g. This is "
+                                "natural sugar from fruit or milk, but this much in "
+                                "one go will still spike your blood sugar."))
     elif sugars > SUGAR_VERY_HIGH:
-        risks.append((VERY_HIGH, f"Very High Sugar (>{SUGAR_VERY_HIGH:.0f}g): High risk "
-                                 "of diabetes, weight gain, and dental issues."))
+        risks.append((VERY_HIGH, f"Very high in sugar — {_amount(sugars)}g. This raises "
+                                 "your risk of diabetes, weight gain and tooth decay."))
     elif sugars > SUGAR_HIGH:
-        risks.append((HIGH, f"High Sugar (>{SUGAR_HIGH:.0f}g): Risk for diabetes and "
-                            "blood-sugar spikes."))
+        risks.append((HIGH, f"High in sugar — {_amount(sugars)}g. Your blood sugar will "
+                            "spike, and regular amounts like this raise your diabetes "
+                            "risk."))
     elif sugars >= ADDED_SUGAR_MIN and fiber < ADDED_SUGAR_MAX_FIBER:
-        risks.append((HIGH, f"Added Sugar (>={ADDED_SUGAR_MIN:.0f}g with almost no "
-                            "fiber): typical of soft drinks, candy and juice; causes "
-                            "rapid blood-sugar spikes."))
+        risks.append((HIGH, f"Sugary with no fiber to slow it down — {_amount(sugars)}g "
+                            "of sugar. This is what cold drinks, packaged juice and "
+                            "sweets look like, and your blood sugar will spike fast."))
     elif sugars > SUGAR_MODERATE:
-        risks.append((MODERATE, f"Moderate Sugar (>{SUGAR_MODERATE:.0f}g): Fine in "
-                                "moderation; avoid if pre-diabetic."))
+        risks.append((MODERATE, f"Some sugar in here — {_amount(sugars)}g. Fine in small "
+                                "amounts, but go easy if you are pre-diabetic."))
 
     # --- Sodium: blood pressure / kidneys ---
     if sodium > SODIUM_VERY_HIGH:
-        risks.append((VERY_HIGH, f"Very High Sodium (>{SODIUM_VERY_HIGH:.0f}mg): Strong "
-                                 "risk of hypertension and kidney strain."))
+        risks.append((VERY_HIGH, f"Very salty — {_amount(sodium)}mg of sodium. This "
+                                 "pushes up your blood pressure and makes your kidneys "
+                                 "work harder."))
     elif sodium > SODIUM_HIGH:
-        risks.append((HIGH, f"High Sodium (>{SODIUM_HIGH:.0f}mg): Risk of hypertension; "
-                            "limit for blood-pressure patients."))
+        risks.append((HIGH, f"Salty — {_amount(sodium)}mg of sodium. This can raise your "
+                            "blood pressure, so keep it limited if you have BP "
+                            "problems."))
     elif is_snack and sodium > SNACK_SODIUM_HIGH:
-        risks.append((HIGH, f"Salty Snack (>{SNACK_SODIUM_HIGH:.0f}mg sodium): packaged "
-                            "snacks concentrate salt; raises blood pressure."))
+        risks.append((HIGH, f"Salty snack — {_amount(sodium)}mg of sodium. Packet snacks "
+                            "hide a lot of salt, which slowly raises your blood "
+                            "pressure."))
 
     # --- Processed snack fat: catches fried/packaged snacks that sit under
     #     the general fat bar. Fiber separates chips from nuts and seeds.
     if is_snack and fat > SNACK_FAT_HIGH and fiber < SNACK_FAT_MAX_FIBER:
-        risks.append((HIGH, f"Processed Snack Fat (>{SNACK_FAT_HIGH:.0f}g fat with "
-                            f"<{SNACK_FAT_MAX_FIBER:.0f}g fiber): typical of fried or "
-                            "packaged snacks."))
+        risks.append((HIGH, f"Looks like a fried or packet snack — {_amount(fat)}g of "
+                            f"fat and only {_amount(fiber)}g of fiber. Filling, but it "
+                            "gives your body very little of what it needs."))
 
     # --- Cholesterol: arterial health ---
     if cholesterol > CHOLESTEROL_HIGH:
-        risks.append((HIGH, f"High Cholesterol (>{CHOLESTEROL_HIGH:.0f}mg): Increases "
-                            "risk of atherosclerosis and stroke."))
+        risks.append((HIGH, f"High in cholesterol — {_amount(cholesterol)}mg. Over time "
+                            "this can clog your arteries and raise your stroke risk."))
     elif cholesterol > CHOLESTEROL_MODERATE:
-        risks.append((MODERATE, f"Elevated Cholesterol (>{CHOLESTEROL_MODERATE:.0f}mg): "
-                                "Borderline; monitor if you have heart issues."))
+        risks.append((MODERATE, f"Cholesterol is on the higher side — "
+                                f"{_amount(cholesterol)}mg. Worth watching if you "
+                                "already have heart trouble."))
 
     # --- Calories: overall energy balance ---
     if calories > CALORIES_HIGH:
-        risks.append((MODERATE, f"Very High Calories (>{CALORIES_HIGH:.0f} kcal): Heavy "
-                                "meal; may contribute to weight gain if frequent."))
+        risks.append((MODERATE, f"This is a very heavy meal — {_amount(calories)} "
+                                "calories. Fine sometimes, but eating like this often "
+                                "will add weight."))
     elif calories > CALORIES_MODERATE:
-        risks.append((MODERATE, f"High Calories (>{CALORIES_MODERATE:.0f} kcal): "
-                                "Calorie-dense; balance with activity."))
+        risks.append((MODERATE, f"This is a heavy meal — {_amount(calories)} calories. "
+                                "Try to balance it with a walk or some exercise."))
 
     # --- Fiber: digestive health (low fiber is the risk) ---
     if fiber < FIBER_LOW and calories >= FIBER_MIN_CALORIES:
-        risks.append((MODERATE, f"Low Fiber (<{FIBER_LOW:.0f}g): Poor for digestion and "
-                                "gut health."))
+        if fiber == 0:
+            risks.append((MODERATE, "There is no fiber in this at all. Your stomach "
+                                    "needs fiber to digest food properly, so pair it "
+                                    "with vegetables or a salad."))
+        else:
+            risks.append((MODERATE, f"Very little fiber — only {_amount(fiber)}g. Your "
+                                    "stomach needs fiber to digest food properly."))
 
     # --- Protein: very high protein strains kidneys ---
     if protein > PROTEIN_HIGH:
-        risks.append((MODERATE, f"Very High Protein (>{PROTEIN_HIGH:.0f}g): May strain "
-                                "kidneys; caution for renal patients."))
+        risks.append((MODERATE, f"A lot of protein in one go — {_amount(protein)}g. This "
+                                "much makes your kidneys work harder, so be careful if "
+                                "you have kidney problems."))
 
     # --- Combined / compound risk patterns ---
     if fiber < FIBER_LOW and fat > FAT_MODERATE and not whole_plant:
-        risks.append((HIGH, "Low Fiber + High Fat: Digestive risks and slower "
-                            "metabolism."))
+        risks.append((HIGH, "Heavy in fat with almost no fiber. This sits in your "
+                            "stomach and is hard to digest."))
     if sugars > SUGAR_HIGH and fat > FAT_HIGH and not intrinsic_sugar:
-        risks.append((HIGH, "High Sugar + High Fat: Strong link to obesity and "
-                            "metabolic syndrome."))
+        risks.append((HIGH, "High in both sugar and fat. This is the combination that "
+                            "puts on weight the fastest."))
     if sodium > SODIUM_HIGH and cholesterol > CHOLESTEROL_MODERATE:
-        risks.append((HIGH, "High Sodium + High Cholesterol: Compounded cardiovascular "
-                            "risk."))
+        risks.append((HIGH, "Salty and high in cholesterol at the same time. That is "
+                            "double pressure on your heart."))
     if water < WATER_LOW and sodium > SODIUM_HIGH:
-        risks.append((MODERATE, "Low Water + High Sodium: Risk of dehydration and water "
-                                "retention."))
+        risks.append((MODERATE, "Plenty of salt but not much water. You may end up "
+                                "feeling bloated and thirsty — drink more water."))
 
+    risks.sort(key=lambda item: SEVERITY_ORDER[item[0]])
     return risks
 
 
